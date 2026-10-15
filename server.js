@@ -1,19 +1,52 @@
-const express = require('express');
-const path = require('path');
+const { validateConfig } = require('./config/env');
+const { initializeDatabase, disconnectDatabase } = require('./config/db');
+const { createApp } = require('./app');
 
-const userRoutes = require('./routes/userRoutes');
-const productRoutes = require('./routes/productRoutes');
-const cartRoutes = require('./routes/cartRoutes');
+async function startServer() {
+    const config = validateConfig();
+    await initializeDatabase();
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+    const server = createApp().listen(config.port, () => {
+        console.info(`Shopdesk server listening on port ${config.port} (${config.nodeEnv})`);
+    });
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/users', userRoutes);
-app.use('/products', productRoutes);
-app.use('/cart', cartRoutes);
+    let shuttingDown = false;
+    async function shutdown(signal) {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        console.info(`${signal} received; shutting down gracefully.`);
+        server.close(async (error) => {
+            try {
+                await disconnectDatabase();
+            } catch (disconnectError) {
+                console.error('Database shutdown failed:', disconnectError.message);
+                process.exitCode = 1;
+            }
+            if (error) {
+                console.error('HTTP server shutdown failed:', error.message);
+                process.exitCode = 1;
+            }
+        });
+        setTimeout(() => {
+            console.error('Graceful shutdown timed out.');
+            process.exit(1);
+        }, 10000).unref();
+    }
+    process.once('SIGINT', () => shutdown('SIGINT'));
+    process.once('SIGTERM', () => shutdown('SIGTERM'));
+    return server;
+}
 
-app.listen(PORT, () => {
-    console.log(`E-commerce API is running on port ${PORT}`);
-});
+if (require.main === module) {
+    startServer().catch(async (error) => {
+        console.error('Shopdesk startup failed:', error.message);
+        try {
+            await disconnectDatabase();
+        } catch (disconnectError) {
+            console.error('Database cleanup failed:', disconnectError.message);
+        }
+        process.exitCode = 1;
+    });
+}
+
+module.exports = { startServer };
